@@ -1,1 +1,1 @@
-Please see (https://mastodoncontentmover.github.io/)
+Please see https://mastodoncontentmover.github.io/
