@@ -683,6 +683,9 @@ public class Mover {
 
          // We post if we either don't care whether it's bookmarked, or we do *and* it is bookmarked      
          boolean posting = ( (!parameterBookmarkedOnly) || (parameterBookmarkedOnly && p.isBookmarked()) );    
+         
+         // Emergency fix 5/24 for failure on reboosts (which are not implemented yet, but code instead just tries to post a status with zero-length text field)
+         posting = posting && (p.getText().length() > 0);
                                         
          boolean dateCheck = ((parameterFrom == null) && (parameterUntil == null));  // We don't have a from or an until parameter                                     
          dateCheck = (dateCheck || ( (parameterUntil == null) && (parameterFrom != null) && (p.isAfter(parameterFrom)) ) );    // We have only a "from" dateTime parameter, and the post is after it
@@ -743,17 +746,17 @@ public class Mover {
    
             // Check for a replyToId
             String irti = p.getInReplyToArchiveId();  // Gets the internal post Id (based on original post creation date) of our post to which this post replies
-            String instanceId = null;
+            String irtInstanceId = null;
             if (irti != null) {
                Post irtp = archive.getPostByArchiveId(irti);  // Gets the Post object this post replies to, but we need to find the Mastodon instance id for it on the instance we're reposting to
-               instanceId = irtp.getLatestMastodonId(parameterInstance); // Gets the most recent internal Mastodon instance id for this post on the instance we're reposting to          
-               if (instanceId != null) {
-                  instanceId = PostArchive.getInstanceIdFromMastodonId(instanceId);   // Gets the instance-specific id, without the part that specifies the instance address
+               irtInstanceId = irtp.getLatestMastodonId(parameterInstance); // Gets the most recent internal Mastodon instance id for this post on the instance we're reposting to          
+               if (irtInstanceId != null) {
+                  irtInstanceId = PostArchive.getInstanceIdFromMastodonId(irtInstanceId);   // Gets the instance-specific id, without the part that specifies the instance address
                }
             }
    
             if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Reply to - irti: " + irti + " \n");  }
-            if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Reply to - instanceId: " + instanceId + " \n");  }
+            if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Reply to - instanceId: " + irtInstanceId + " \n");  }
    
    
             // Replace @ characters in text
@@ -769,13 +772,15 @@ public class Mover {
    
             Status z = authenticatedClient.statuses().postStatus(text, 
                                                                  visibility,
-                                                                 instanceId,   // replying to
+                                                                 irtInstanceId,   // replying to
                                                                  mediaIds, 
                                                                  p.isSensitive(), 
                                                                  p.getSpoilerText(), 
                                                                  p.getLanguage()
                                                                  ).execute();
    
+            // TODO: (5/24) Should do a check here that z isn't null
+
             // Register the new Mastodon instance id for our post
             p.addMastodonId(PostArchive.getMastodonId(parameterInstance, z.getId()));
             System.out.print(".");
