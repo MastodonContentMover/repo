@@ -729,7 +729,13 @@ public class Mover {
    
                   if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + " filepath " + mf.getFilepath() + " \n");  }
                   final ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
-                  final File media = new File(classLoader.getResource(mf.getFilepath()).getFile());
+
+                  //   ********** START: 5/25 emergency image upload fix v0.01.02 ********** (TODO: Tidy this up -- log an issue to suggest a stream interface on the Bigbone library?)
+                  //   final File media = new File(classLoader.getResource(mf.getFilepath()).getFile());   // Code used until this fix, which doesn't work when tool is run from a JAR file
+                  String actualPath = mf.getFilepath().replace('/', File.separator.charAt(0));   // TODO: Check this is platform independent, also check why saving isn't affected (it tests ok), also figure out why we're using replaceAll in MediaFile (return filepath.replaceAll(Pattern.quote(File.separator), "/");) and if it's right there why it isn't right here... but not at 2am
+                  final File media = new File(actualPath);
+                  //   ********** END: 5/25 emergency image upload fix v0.01.02 **********
+
                   if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + " classLoader path " + media.getPath() + " \n");  }
          
                   if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Alt text: " + mf.getAltText() + " \n");  }
