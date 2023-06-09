@@ -123,7 +123,8 @@ public class OAuthListener {
          outputStream.flush();
          outputStream.close();
 
-         if (Mover.showDebug()) {  System.out.println("Sending back " + code);   }
+         if (Mover.showDebug()) {  System.out.println("OAuthRequestHandler#handle: Sending back OAuth callback code");   }
+         if (false) {  System.out.println("OAuthRequestHandler#handle: Code: " + code);   }
          Authenticator.getSingletonInstance().oAuthCallback(code);
       }
    }

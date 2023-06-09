@@ -129,13 +129,14 @@ public class ClientCredentialStore {
  
             jaxbMarshaller.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT, true);
    
-            //Marshal to console
-            if (Mover.showDebug()) {  
-               System.out.println(Mover.getDebugPrefix() + "Writing ClientCredentialStore to file: \n");
+            //Marshal to console (extreme debugging only)
+            if (false) {  
                jaxbMarshaller.marshal(singletonInstance, System.out);
             }
    
             //Marshal to file
+
+            if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Writing ClientCredentialStore to file: \n");   }
             jaxbMarshaller.marshal(singletonInstance, new File(FILENAME));
          }
       } else {

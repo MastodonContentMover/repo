@@ -1,6 +1,7 @@
 package io.github.mastodonContentMover;
 
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.regex.Pattern;
@@ -8,7 +9,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.Locale;
 import java.time.format.DateTimeFormatter;
 import java.time.ZonedDateTime;
+import java.time.Duration;
 import java.io.File;
+import java.net.URL;
+import java.net.MalformedURLException;
+import java.net.URI;
+import java.net.URISyntaxException;
 
 //   JAXB for persistence
 import jakarta.xml.bind.annotation.XmlAccessType;
@@ -27,11 +33,13 @@ import social.bigbone.api.Pageable;
 import social.bigbone.api.Range;
 import social.bigbone.api.Scope;
 import social.bigbone.api.entity.Application;
+import social.bigbone.api.entity.Instance;
 import social.bigbone.api.entity.Status;
 import social.bigbone.api.entity.Status.Visibility;
 import social.bigbone.api.entity.MediaAttachment;
 import social.bigbone.api.entity.data.Focus;
 import social.bigbone.api.exception.BigBoneRequestException;
+
 
 //   Explicit imports added so Bigbone dependencies are included
 import kotlin.jvm.internal.Intrinsics;   // Needs kotlin-runtime-1.2.71.jar or kotlin-stdlib-1.8.10.jar
@@ -113,6 +121,10 @@ public class Mover {
 
 
    private static final String DATA_DIRECTORY = "data";   // TODO: Could perhaps make this a parameter later
+   private static final int UNPROCESSABLE_CONTENT_HTTP_ERROR = 422;
+   private static final int DEFAULT_POST_LENGTH_LIMIT_CHARACTERS = 500;
+   private static final int DEFAULT_MEDIA_ATTACHMENT_LIMIT_COUNT = 4;
+   private static final int DEFAULT_URL_CHARACTER_COUNT = 23;
 
    // Interface constants
    private static final String ERROR_MESSAGE_PREFIX = "ERROR: ";
@@ -128,6 +140,8 @@ public class Mover {
    private static final String MALFORMED_PARAMETER_UNKNOWN_OPERATION_PREFIX = "Unknown operation specified ";
 
    private static final int INTERFACE_STATUS_TEXT_TRUNCATE_LENGTH = 70;
+
+   private static final int DURATION_ESTIMATE_MARGIN_PERCENT = 5;   // Add 5% onto all duration estimates
 
    // API settings
    private static final int STATUSES_PER_PAGE = 40;   // Current maximum
@@ -153,6 +167,7 @@ public class Mover {
    private static String parameterUntil = null;
    private static Integer parameterExtraThrottleSeconds = null;
    private static Integer parameterCustomPort = null;
+   private static Boolean parameterSuppressPublic = null; 
 
    // Parameter names must be specified here as lower case so case-insensitive matching works
    private static final String PARAMETER_NAME_INSTANCE = "instance";
@@ -167,6 +182,7 @@ public class Mover {
    private static final String PARAMETER_NAME_UNTIL = "until";   // takes an ISO 8601 date time
    private static final String PARAMETER_NAME_EXTRA_THROTTLE_SECONDS = "extrathrottle"; 
    private static final String PARAMETER_NAME_CUSTOM_PORT = "customport"; 
+   private static final String PARAMETER_NAME_SUPPRESS_PUBLIC = "suppresspublic"; 
    private static final String OPERATION_NAME_SAVE = "save";
    private static final String OPERATION_NAME_POST = "post";
 
@@ -184,6 +200,7 @@ public class Mover {
    */
    public static void main(String[] args) {
 
+
       System.out.println("\n********** Mastodon Content Mover **********\n");   // TODO: Might be nice to add a timestamp output at startup
 
 
@@ -197,6 +214,14 @@ public class Mover {
          Mover.printEndTimestamp();
          System.exit(-1);
       }
+
+
+      // ******************************************************************************************
+      // ****************************** Uncomment below to run test harness
+      // testSegmentText();
+      // System.exit(0); 
+      // ******************************************************************************************
+
 
       if (parameterOperation.equals(OPERATION_NAME_SAVE)) {
 
@@ -307,6 +332,25 @@ public class Mover {
                      }
                      else if (b[1].toLowerCase().equals("no")) {
                         parameterBookmarkedOnly = Boolean.valueOf(false);
+                     }
+                     else {
+                        throw new IllegalArgumentException(MALFORMED_PARAMETER_PREFIX + MALFORMED_PARAMETER_INVALID_VALUE_PREFIX + "'" + b[0] + "'. " + MALFORMED_PARAMETER_SUFFIX); 
+                     }
+         
+                     System.out.println("Parameter '" + b[0] + "' set to '" + b[1] + "' \n");
+
+                  } else {
+                      throw new IllegalArgumentException(MALFORMED_PARAMETER_PREFIX + "'" + b[0] + "' " + MALFORMED_PARAMETER_ALREADY_DEFINED_SUFFIX + MALFORMED_PARAMETER_SUFFIX); 
+                  }
+               }
+               else if (b[0].toLowerCase().equals(PARAMETER_NAME_SUPPRESS_PUBLIC)) {  // Can't switch on boolean
+
+                  if (parameterSuppressPublic == null) {   // TODO: Turn this repeated logic into a convenience method, and do the same for the logic repeatedly used in the switch statements
+                     if (b[1].toLowerCase().equals("yes")) {
+                        parameterSuppressPublic = Boolean.valueOf(true);
+                     }
+                     else if (b[1].toLowerCase().equals("no")) {
+                        parameterSuppressPublic = Boolean.valueOf(false);
                      }
                      else {
                         throw new IllegalArgumentException(MALFORMED_PARAMETER_PREFIX + MALFORMED_PARAMETER_INVALID_VALUE_PREFIX + "'" + b[0] + "'. " + MALFORMED_PARAMETER_SUFFIX); 
@@ -444,6 +488,7 @@ public class Mover {
       if (parameterPreservePins == null) {  parameterPreservePins = Boolean.valueOf(true);   }
       if (parameterBookmarkedOnly == null) {  parameterBookmarkedOnly = Boolean.valueOf(false);   }
       if (parameterExtraThrottleSeconds == null) {  parameterExtraThrottleSeconds = Integer.valueOf(0);   }     
+      if (parameterSuppressPublic == null) {  parameterSuppressPublic = Boolean.valueOf(true);   }
 
       /**
       *   DO NOT set the custom port parameter to the default here, otherwise it will 
@@ -528,9 +573,27 @@ public class Mover {
       } while (lastFetched > 0);
       if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Done - fetched " + results.size() + " statuses \n");  }
 
-      System.out.print("\nFetching post content: \n"); // Have to send carriage return first, after the dots
 
-     
+      // Estimate time required to archive posts as per parameters
+      ListIterator q = results.listIterator(results.size());
+      long secondsToCompletion = 0;   
+      while (q.hasPrevious()) {
+         Status s = (Status)q.previous();
+         if ((!parameterBookmarkedOnly) || (parameterBookmarkedOnly && s.isBookmarked())) {
+            secondsToCompletion = secondsToCompletion + API_THROTTLE_SECONDS + parameterExtraThrottleSeconds; // for the post text
+            List<MediaAttachment> media = s.getMediaAttachments();
+            if (media != null) {
+               secondsToCompletion = secondsToCompletion + (media.size() * (API_THROTTLE_SECONDS + parameterExtraThrottleSeconds));
+            }
+         }
+      }
+      secondsToCompletion = Math.round( Math.ceil( secondsToCompletion * (1 + (DURATION_ESTIMATE_MARGIN_PERCENT / 100.0)) ) );
+      Duration d = Duration.ofSeconds(secondsToCompletion);
+      System.out.print("\n\nEstimated time to completion: ");
+      printDuration(d);
+
+      System.out.print("\nFetching post content: \n");
+      // Main saving loop
       ListIterator i = results.listIterator(results.size());  // Get a listIterator with initial position set to the end (size()) - the first call to previous() returns position minus one
       while (i.hasPrevious()) {
          Status s = (Status)i.previous();
@@ -594,7 +657,8 @@ public class Mover {
                newPost.setLanguage(s.getLanguage());
                newPost.setIsFavourited(s.isFavourited());
                newPost.setIsBookmarked(s.isBookmarked());
-               if (s.isPinned() != null) {   newPost.setIsPinned(s.isPinned());   }
+               // if (s.isPinned() != null) {   newPost.setIsPinned(s.isPinned());   }   // up to v00.01.03 (pre-BigBone snapshot 17 bigbone-2.0.0-20230530.130705-17.jar)
+               newPost.setIsPinned(s.isPinned());
    
                newPost.setFavouritesCount(s.getFavouritesCount());
                newPost.setReblogsCount(s.getReblogsCount());
@@ -668,14 +732,71 @@ public class Mover {
       }
 
       String accountId = authenticatedClient.accounts().verifyCredentials().execute().getId();
-
       if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "id: " + accountId + " \n");  }
+
+
+      // Get limits from target instance
+      Instance targetInstance = authenticatedClient.instances().getInstance().execute();
+
+      // int postLengthLimit = DEFAULT_POST_LENGTH_LIMIT_CHARACTERS;   // Adjust this when value is available from instance via BigBone
+      int postLengthLimit = targetInstance.getConfiguration().getStatuses().getMaxCharacters();   
+      if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "postLengthLimit: " + postLengthLimit + " \n");   }
+
+      // int mediaAttachmentLimit = DEFAULT_MEDIA_ATTACHMENT_LIMIT_COUNT;   // Adjust this when value is available from instance via BigBone
+      int mediaAttachmentLimit = targetInstance.getConfiguration().getStatuses().getMaxMediaAttachments();  
+      if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "mediaAttachmentLimit: " + mediaAttachmentLimit + " \n");   }
+
+
+
       if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "parameterFrom: " + parameterFrom + " \n");   }
       if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "parameterUntil: " + parameterUntil + " \n");   }
 
       PostArchive archive = PostArchive.getSingletonInstance(parameterArchiveName, true);   
-      int repostedCounter = 0;
 
+
+      // Estimate time required to repost posts as per parameters
+      Iterator q = archive.getAllPosts().iterator();
+      long secondsToCompletion = 0;   
+      while (q.hasNext()) {
+         Post p = (Post)q.next();
+         if ((!parameterBookmarkedOnly) || (parameterBookmarkedOnly && p.isBookmarked())) {
+
+            if (p.getText().length() > 0) { // TODO: Remove this when boosts are enabled
+
+               // Date checking logic shamelessly copied and pasted from the main posting loop - TODO: consider whether to turn this into a convenience method
+               boolean dateCheck = ((parameterFrom == null) && (parameterUntil == null));  // We don't have a from or an until parameter                                     
+               dateCheck = (dateCheck || ( (parameterUntil == null) && (parameterFrom != null) && (p.isAfter(parameterFrom)) ) );    // We have only a "from" dateTime parameter, and the post is after it
+               dateCheck = (dateCheck || ( (parameterFrom == null) && (parameterUntil != null) && (p.isBefore(parameterUntil)) ) );  // We have only an "until" dateTime parameter, and the post is after it      
+               dateCheck = (dateCheck || ( (parameterFrom != null) && (parameterUntil != null) && (p.isAfter(parameterFrom)) && (p.isBefore(parameterUntil)) ) ); // We have a "from" and an "until" parameter, and the post is between them      
+
+               if (dateCheck) {
+   
+                  secondsToCompletion = secondsToCompletion + API_THROTTLE_NEW_POST_SECONDS + parameterExtraThrottleSeconds; // for the post itself
+                  List<MediaFile> media = p.getMedia();
+                  if (media != null) {
+                     secondsToCompletion = secondsToCompletion + (media.size() * (API_THROTTLE_MEDIA_UPLOAD_SECONDS + parameterExtraThrottleSeconds)); // for uploading media
+                  }
+                  if (p.isBookmarked() && parameterPreserveBookmarks.booleanValue()) {
+                     secondsToCompletion = secondsToCompletion + API_THROTTLE_SECONDS + parameterExtraThrottleSeconds; // for rebookmarking
+                  }
+                  if (p.isPinned() && parameterPreservePins.booleanValue()) {
+                     secondsToCompletion = secondsToCompletion + API_THROTTLE_SECONDS + parameterExtraThrottleSeconds; // for repinning
+                  }  
+
+               }
+
+            }  // length check
+         }  // bookmarked / params
+      }
+      secondsToCompletion = Math.round( Math.ceil( secondsToCompletion * (1 + (DURATION_ESTIMATE_MARGIN_PERCENT / 100.0)) ) );
+      Duration d = Duration.ofSeconds(secondsToCompletion);
+      System.out.print("Estimated time to completion: ");
+      printDuration(d);
+      System.out.println(" ");
+
+
+      int repostedCounter = 0;
+      // Main reposting loop
       for (Post p : archive.getAllPosts()) {
      
          if (Mover.showDebug()) {   System.out.println(Mover.getDebugPrefix() + "p.isAfter(parameterFrom): " + ( (parameterFrom != null) && (p.isAfter(parameterFrom)) ));   }
@@ -713,6 +834,13 @@ public class Mover {
             if (actualVisibility.equals(Visibility.Private.toString().toLowerCase())) { visibility = Visibility.Private; }
             else if (actualVisibility.equals(Visibility.Unlisted.toString().toLowerCase())) { visibility = Visibility.Unlisted; }
             else if (actualVisibility.equals(Visibility.Public.toString().toLowerCase())) { visibility = Visibility.Public; }
+
+            // If parameter has been set to suppress public statuses (so they don't flood
+            // the local and federated timelines), set any public statuses to unlisted
+            if ((parameterSuppressPublic) && (visibility == Visibility.Public)) {
+               visibility = Visibility.Unlisted;
+            }
+
    
             // Post media and create list of IDs
             List<String> mediaIds = null;
@@ -750,67 +878,152 @@ public class Mover {
                }
             }
    
-            // Check for a replyToId
+            // Check for a replyToId for an earlier status in a self thread
             String irti = p.getInReplyToArchiveId();  // Gets the internal post Id (based on original post creation date) of our post to which this post replies
             String irtInstanceId = null;
             if (irti != null) {
                Post irtp = archive.getPostByArchiveId(irti);  // Gets the Post object this post replies to, but we need to find the Mastodon instance id for it on the instance we're reposting to
-               irtInstanceId = irtp.getLatestMastodonId(parameterInstance); // Gets the most recent internal Mastodon instance id for this post on the instance we're reposting to          
-               if (irtInstanceId != null) {
-                  irtInstanceId = PostArchive.getInstanceIdFromMastodonId(irtInstanceId);   // Gets the instance-specific id, without the part that specifies the instance address
+               if (irtp != null) {   // may happen if the archive is manually edited to remove folders for earlier posts - the reference remains on this post, but the post it points to won't be in the archive
+                  irtInstanceId = irtp.getLatestMastodonId(parameterInstance); // Gets the most recent internal Mastodon instance id for this post on the instance we're reposting to          
+                  if (irtInstanceId != null) {
+                     irtInstanceId = PostArchive.getInstanceIdFromMastodonId(irtInstanceId);   // Gets the instance-specific id, without the part that specifies the instance address
+                  }
                }
             }
    
             if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Reply to - irti: " + irti + " \n");  }
             if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Reply to - instanceId: " + irtInstanceId + " \n");  }
    
-   
-            // Replace @ characters in text
-            String text = p.getText().replaceAll("@", "＠");
+            // Strip any trailing spaces (mostly to prevent counting the length as over the instance post limit because of them even when it isn't really)
+            String text = p.getText().stripTrailing();
+
+            // Replace @ characters in text so long as they are preceded by a whitespace and are not the final character
+            text = substituteCharacters(text, "@", "＠"); 
 
             // Replace # characters in text if parameter wasn't set to preserve them   
             if(!parameterPreserveHashtags.booleanValue()) {
                if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "parameterPreserveHashtags.booleanValue() " + parameterPreserveHashtags.booleanValue() + " \n");  }
    
-               // Replace # characters in text
-               text = text.replaceAll("#", "⋕");
-            }
-   
-            Status z = authenticatedClient.statuses().postStatus(text, 
-                                                                 visibility,
-                                                                 irtInstanceId,   // replying to
-                                                                 mediaIds, 
-                                                                 p.isSensitive(), 
-                                                                 p.getSpoilerText(), 
-                                                                 p.getLanguage()
-                                                                 ).execute();
-   
-            // TODO: (5/24) Should do a check here that z isn't null
-
-            // Register the new Mastodon instance id for our post
-            p.addMastodonId(PostArchive.getMastodonId(parameterInstance, z.getId()));
-            System.out.print(".");
-            try { TimeUnit.SECONDS.sleep(API_THROTTLE_NEW_POST_SECONDS + parameterExtraThrottleSeconds);  }  catch (InterruptedException ie) {   }
-            
-            // Rebookmark if it hasn't been disabled
-            if (p.isBookmarked() && parameterPreserveBookmarks.booleanValue()) {
-
-               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "rebookmarking " + z.getId() + " \n");  }               
-               authenticatedClient.statuses().bookmarkStatus(z.getId()).execute(); 
-               System.out.print(".");
-               try { TimeUnit.SECONDS.sleep(API_THROTTLE_SECONDS + parameterExtraThrottleSeconds);  }  catch (InterruptedException ie) {   }
+               // Replace # characters in text so long as they are preceded by a whitespace and are not the final character
+               text = substituteCharacters(text, "#", "⋕"); 
             }
 
-            // Repin if it hasn't been disabled            
-            if (p.isPinned() && parameterPreservePins.booleanValue()) {
+            // As of v0.01.03, this section posts multiple statuses where text exceeds
+            // the instance post character limit, or where attached media exceeds the
+            // maximum number of media attachments for the instance
 
-               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "repinning " + z.getId() + " \n");  }                    
-               authenticatedClient.statuses().pinStatus(z.getId()).execute(); 
-               System.out.print(".");
-               try { TimeUnit.SECONDS.sleep(API_THROTTLE_SECONDS + parameterExtraThrottleSeconds);  }  catch (InterruptedException ie) {   }
-            }            
+            ArrayList<String> textSegmented = new ArrayList();
+            if (getPostedLength(text) > postLengthLimit) {   // Limit is based on the number of unicode "code points" (characters), not the number of unicode "code units" (blocks) that form them - see https://dzone.com/articles/java-string-length-confusion
+               System.out.print("\nSplitting post into segments due to instance character limit (length: " + getPostedLength(text) + ", limit: " + postLengthLimit + ")");   // TODO: Make message part a constant
+               textSegmented = segmentText(text, postLengthLimit);   // divide our text so each portion will not exceed the maximum character length for a post on this instance
+            } else {
+               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Not segmenting text (length: " + getPostedLength(text) + ") \n");  }
+               textSegmented.add(text);
+            }
+
+            ArrayList<List> mediaIdsSegmented = new ArrayList();
+            if (mediaIds != null) {
+               if (mediaIds.size() > mediaAttachmentLimit) {
+   
+                  System.out.print("\nSplitting post into segments due to instance media attachment limit (attachments: " + mediaIds.size() + ", limit: " + mediaAttachmentLimit + ")");   // TODO: Make this message a constant
+                  // Divide our media ids into lists that can be attached to each of our posts, with each list not exceeding the maximum number of media attachments for a status on the instance
+                  Iterator mi = mediaIds.iterator();
+                  ArrayList n = new ArrayList();
+                  int j = 1;   
+                  while(mi.hasNext()) {
+                     n.add(mi.next()); 
+                     j++;
+                     if (j > mediaAttachmentLimit) {
+                        mediaIdsSegmented.add((ArrayList)n.clone());   // (shallow) clone it because if we add n, then reassign n to a new object, we'll lose what we added (n is an object reference)!
+                        n.clear();   // since we cloned, we may as well reuse rather than assigning to a newly instantiated ArrayList
+                        j = 1;
+                     }
+                  }
+                  mediaIdsSegmented.add((ArrayList)n.clone());   // for the last set, because we exited the while statement before hitting the maximum number that could be attached, so never added n to mediaIdsSegmented on the last iteration
+   
+               } else {
+                  mediaIdsSegmented.add(mediaIds);
+               }
+               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "mediaIdsSegmented: " + mediaIdsSegmented + " \n");  }
+            }
+
+
+
+            for (int k = 0; k < Math.max(textSegmented.size(), mediaIdsSegmented.size()); k++) {   // combined loop for all segments needed to post all text and all meda 
+
+               String textThisTime = "";
+               if (k < textSegmented.size()) {
+                  textThisTime = textSegmented.get(k);
+               }
+
+               List mediaIdsThisTime = null;
+               if (k < mediaIdsSegmented.size()) {
+                  mediaIdsThisTime = mediaIdsSegmented.get(k);
+                  if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "k: " + k + " mediaIdsThisTime: " + mediaIdsThisTime + " \n");  }
+
+               }
+               // TODO: Figure out how to handle Post data with multiple media files that
+               // fall within the limit for number of attachments but that include a mix
+               // (such as one video file and two image files) that is not accepted by an
+               // instance - will currently throw an HTTP 422 error, I think
+
+               // ***********************************************************************
+               // Note: irtInstanceId is the Mastodon internal id on the instance we're 
+               // posting to for a post we're replying to (defined earlier). First time 
+               // this loops, it'll be the id of any previous status in a self-thread. 
+               // From the second loop onward, it'll be the id for the status posted in 
+               // the previous iteration (because multiple iterations means the status 
+               // text in our archive was too long to post in a single status on this 
+               // instance and had to be split, and we have to thread those multiple 
+               // sections together). After posting we will reassign it within this loop
+               // to the id of the status we just posted, to make this happen.
+
+               Status z = (Status)authenticatedClient.statuses().postStatus(textThisTime, 
+                                                                            visibility, 
+                                                                            irtInstanceId, 
+                                                                            mediaIdsThisTime, 
+                                                                            p.isSensitive(), 
+                                                                            p.getSpoilerText(), 
+                                                                            p.getLanguage()
+                                                                            ).execute();
+
+               if (z == null) {    
+  
+                  if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + " Status was null after posting! \n");  }
+                  throw new IllegalStateException ("Status z was null after posting");
+
+               } else {
+
+                  irtInstanceId = z.getId();   // as mentioned earlier, to thread our segments together
+
+                  // Register the new Mastodon instance id for our post
+                  p.addMastodonId(PostArchive.getMastodonId(parameterInstance, z.getId()));
+                  System.out.print(".");
+                  try { TimeUnit.SECONDS.sleep(API_THROTTLE_NEW_POST_SECONDS + parameterExtraThrottleSeconds);  }  catch (InterruptedException ie) {   }
             
-            repostedCounter++;
+                  // Rebookmark if it hasn't been disabled - if we have multiple segments, rebookmark all of them
+                  if (p.isBookmarked() && parameterPreserveBookmarks.booleanValue()) {
+
+                     if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "rebookmarking " + z.getId() + " \n");  }               
+                     authenticatedClient.statuses().bookmarkStatus(z.getId()).execute(); 
+                     System.out.print(".");
+                     try { TimeUnit.SECONDS.sleep(API_THROTTLE_SECONDS + parameterExtraThrottleSeconds);  }  catch (InterruptedException ie) {   }
+                  }
+
+                  // Repin if it hasn't been disabled - if we have multiple segments, rebookmark all of them            
+                  if (p.isPinned() && parameterPreservePins.booleanValue()) {
+      
+                     if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "repinning " + z.getId() + " \n");  }                    
+                     authenticatedClient.statuses().pinStatus(z.getId()).execute(); 
+                     System.out.print(".");
+                     try { TimeUnit.SECONDS.sleep(API_THROTTLE_SECONDS + parameterExtraThrottleSeconds);  }  catch (InterruptedException ie) {   }
+                  }  
+
+               }  // END of check that z is not null          
+            
+            }  // END of segment posting loop
+
+            repostedCounter++;   // Leave this outside the segment posting loop as it's a counter for the posts in our archive that we've reposted, not the number of statuses we have posted to the instance
             System.out.println("");
 
          }  // end posting check (bookmarked only and date thresholds)
@@ -820,6 +1033,394 @@ public class Mover {
       System.out.println("\nSuccessfully posted " + repostedCounter + " posts." + " \n");  
 
    } // end posting method
+
+   private static void printDuration(Duration d) {
+
+      boolean moreThanMinutes = false;
+
+      if (d.toDaysPart() > 0) {
+         System.out.print(d.toDaysPart() + " day");
+         if (d.toDaysPart() != 1) {   System.out.print("s");   }
+         System.out.print(" ");
+         moreThanMinutes = true;
+      }
+      if (d.toHoursPart() > 0) {
+         System.out.print(d.toHoursPart() + " hour");
+         if (d.toHoursPart() != 1) {   System.out.print("s");   }
+         System.out.print(" ");
+         moreThanMinutes = true;
+      }
+      if (moreThanMinutes) {   System.out.print("and ");   }
+      System.out.print(d.toMinutesPart() + " minute");
+      if (d.toMinutesPart() != 1) {   System.out.print("s");   }
+      System.out.println(" ");
+   }
+
+   private static String substituteCharacters(String text, String toSubstitute, String replacement) {
+
+      boolean debugThis = false;  // Separate flag as output is too verbose to include in typical debug
+
+      int j = text.indexOf(toSubstitute);
+      while (j >= 0) {
+        if (((j == 0) || Character.isWhitespace(text.codePointAt(j-1))) && (j < (text.length() - 1))) {   // Replace (if it's at the start of text or if the preceding character is whitespace) AND it's not the final character 
+           text = text.substring(0,j) + replacement + text.substring(j + 1, text.length());
+           if (debugThis) {  System.out.println(Mover.getDebugPrefix() + "Substituting " + replacement + " for " + toSubstitute + " at index " + j + " \n");  }                    
+        }
+        if (j < (text.length() - 1)) {   // Only search again if our current match isn't already the last character
+           int newIndex = text.substring(j + 1, text.length()).indexOf(toSubstitute);   // We have to test from the next character, as it's possible we didn't replace the match at j (if it wasn't preceded by whitespace, for example)
+           if (newIndex > 0) {
+              j = j + 1 + newIndex;
+           } else {
+              j = -1;
+           }
+        } else {   // Our current match was the last character
+           j = -1;
+        }
+        if (debugThis) {  System.out.println(Mover.getDebugPrefix() + "Next substitute at index " + j + " \n");  }                    
+      }         
+
+      return text;
+   }
+
+   private static ArrayList<String> segmentText(String originalText, int postLengthLimit) {
+
+      String t = originalText.stripTrailing();   // Remove trailing spaces, so we don't end up posting a whole new status with just an ellipsis and some spaces
+      ArrayList<String> segmentedText = new ArrayList();
+      String ellipsis = "...";      
+      int ellipsisLength = getPostedLength(ellipsis);  // Futureproofing in case we ever use some fancy character in here instead, or allow it to be set as a parameter
+
+      if (postLengthLimit < ((2 * ellipsisLength) + 1)) {   throw new RuntimeException("Post length limit too low (segment limit below 1)");   }  // TODO: Tidy this - improve wording, make it a constant, perhaps use a different exception etc.
+
+
+      // Note repeated from above, but limit is based on the number of unicode "code 
+      // points" (characters), not the number of unicode "code units" (blocks) that form
+      // them - see https://dzone.com/articles/java-string-length-confusion
+
+      if (getPostedLength(t) <= postLengthLimit) {   // Let's check here, just in case  // TEST 1: Post is shorter than or equal to postLengthLimit (should return with one segment)
+
+         segmentedText.add(t);
+         return segmentedText;
+
+      } else {   // TEST 2: Post is longer than postLengthLimit (should segment)
+
+         if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "segmentText: Dividing text into segments \n");  }    
+
+  
+         while (getPostedLength(t) > 0) {
+   
+            if (getPostedLength(t) > (postLengthLimit - ellipsisLength)) {
+
+               // Note the non-first, non-final segment will need two ellipses (one at the
+               // beginning and one at the end)
+               int segmentLimit = postLengthLimit - ellipsisLength;
+
+               if (segmentedText.size() > 0) {   segmentLimit = segmentLimit - ellipsisLength;   }  // deduct the second ellipses length if we're not on the first segment (and we know we're not on the last segment because t is still too long for that)
+   
+               // Use a temporary string variable to hold the longest text that would fit 
+               // in a segment, so we can find the last index of a space and end our
+               // segment without splitting a word. 
+               String s = t.substring(0, segmentLimit);
+               int segmentEndIndex = -1;
+               if (Character.isWhitespace(t.codePointAt(segmentLimit))) {   
+
+                  // Catches case where the word boundary is exactly at the segment 
+                  // limit, so searching for the last whitespace (else, below) would 
+                  // remove the last word when it will actually fit. we know there will
+                  // be characters at segmentLimit and beyond, as this is not the last
+                  // segment
+
+                  segmentEndIndex = segmentLimit;
+               } else {
+                  segmentEndIndex = getIndexOfLastWhitespace(s);  
+
+                  if (segmentEndIndex > 0) {
+                     s = t.substring(0, segmentEndIndex);   // TEST 3: Post is longer than postLengthLimit and segment contains spaces (should segment on space)
+                  } else {   // We couldn't find any spaces at all, so just set the segmentEndIndex to the segmentLimit for the sake of the processing that follows
+                     segmentEndIndex = segmentLimit;  // TEST 4: Post is longer than postLengthLimit and segment does not contain spaces, so leave truncated
+                     // We already set s to t.substring(0, segmentLimit) when we first defined it, above, so there's no need to repeat that
+                  }
+               }
+
+               if (containsUrl(s)) {
+
+                  // Check the length accounting for unicode and urls, and adjust by adding
+                  // or removing a word until we've fitted as much as we can in this segment
+                  int sLength = getPostedLength(s);
+   
+                  while ((sLength < segmentLimit) && (segmentEndIndex < t.length()))  {   
+   
+                      if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "segmentText: Adding to segment as it is below limit (s: " + s + ") length: " + getPostedLength(s) + " (without ellipsis) \n");  }   
+   
+                      int tempIndex = getIndexOfFirstWhitespace(t.substring(segmentEndIndex + 1, t.length())); // we know t doesn't end on a space because we stripped trailing spaces, so we can safely use "segmentEndIndex + 1" here
+                      if (tempIndex >= 0) {  // We don't know what is in between what we have and the next whitespace, so we can't do a boundary check mathematically here to make sure the addition won't push us over the limit
+                         // TEST 5: Post is longer than postLengthLimit, segment contains url longer than 23 characters, and extra words are available (should add as many extra words as possible)
+                         segmentEndIndex = segmentEndIndex + 1 + tempIndex;
+                         s = t.substring(0, segmentEndIndex);  
+                      } else { // We couldn't find any more whitespace, so add the rest of the string
+                         // TEST 6: Post is longer than postLengthLimit, segment contains url longer than 23 characters, and extra words are NOT available (should add the rest of the string)
+                         s = t.substring(0, t.length());  
+                         segmentEndIndex = t.length();
+                      }
+      
+                      sLength = getPostedLength(s);    
+
+                  }   // END: adding while
+   
+                  // At this point we may have ended up over the segment limit
+   
+                  while ((sLength > segmentLimit) && (s.length() > 1)) {  // Boundary condition (s.length() > 1) should never be needed here - for s.length() to be 1 (or below), you'd need a space on the second (or first) character while also having a valid url before that (otherwise that single character would form its own segment, without a url, and would never enter this block) TEST 7: A single character followed by a space is at the start of a candidate segment, followed by a block with no spaces (to confirm understanding)
+                     // TEST 8: Post is longer than postLengthLimit, segment is longer than segment limit due to preceding processing (should be trimmed) 
+                     // TEST 9: Post is longer than postLengthLimit, segment contains url shorter than 23 characters (should be trimmed) 
+      
+                      if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "segmentText: Trimming segment as it is over limit (s: " + s + ") length: " + getPostedLength(s) + " (without ellipsis) \n");  }   
+   
+                      int tempIndex = getIndexOfLastWhitespace(s); // we already ended s on a word (excluding the space that followed), so this should find the next space moving backward through the text
+                      if (tempIndex >= 0) {
+                         // TEST 10: Post is longer than postLengthLimit, segment needs to be trimmed and can be trimmed on word boundary (is trimmed on word boundary)
+                         segmentEndIndex = tempIndex;
+                         s = t.substring(0, segmentEndIndex);  
+                      } else {   // we couldn't find any whitespace within s (excluding the final character, which we know isn't whitespace) but we know we're over the limit, so just truncate
+                         // TEST 11: Post is longer than postLengthLimit, segment needs to be trimmed and cannot be trimmed on word boundary (should be truncated at the longest value for which the sLength (postedLength) is below the segment limit)
+   
+                         if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "segmentText: Failed to trim segment to end on word boundary - truncating iteratively \n");  }  
+                         segmentEndIndex = s.length(); 
+                         while ((sLength > segmentLimit) & (segmentEndIndex > 0)) {
+                            segmentEndIndex--;
+                            s = t.substring(0, segmentEndIndex);  
+                            sLength = getPostedLength(s);  
+                         }
+                         if (segmentEndIndex == 0) {   throw new RuntimeException("segmentText: Failed to truncate iteratively while segmenting post");   }  // TODO: Tidy this - improve wording, make it a constant, perhaps use a different exception etc.
+                         // We should now exit the trimming while loop below the segment limit
+                      }    
+                      sLength = getPostedLength(s);  
+
+                  // System.out.println("s.length(): " + s.length() + " (for TEST 7)");
+
+                  }   // END: trimming while
+
+               }   // END: if (containsUrl(s))
+
+               s = s + ellipsis;   
+               if (segmentedText.size() > 0) {   s = ellipsis + s;   }   // add an ellipsis at the start if we're not on the first segment
+   
+               segmentedText.add(s);
+               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "segmentText: Segment " + (segmentedText.size() - 1) + ": " + segmentedText.get(segmentedText.size() - 1) + " length: " + getPostedLength(segmentedText.get(segmentedText.size() - 1)) + " \n");  }  
+               t = t.substring(segmentEndIndex, t.length()).stripLeading();   // have to stripLeading here, as if the segmentEndIndex is on a space we need to remove the space but if we truncated a block of text we couldn't split arbitrarily removing one character will remove an actual character from that block, not a space
+   
+            } else {   // Last segment - we don't need to adjust this if it contains urls as we already identified the last segment using getPostedLength() in our if statement, above
+               segmentedText.add(ellipsis + t);
+               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "segmentText: Segment " + (segmentedText.size() - 1) + " (last): " + segmentedText.get(segmentedText.size() - 1) + " length: " + getPostedLength(segmentedText.get(segmentedText.size() - 1)) + " \n");  }    
+               t = "";
+            }
+   
+         }
+         
+         if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "segmentText: Original text was " + originalText + " \n");  }                    
+         if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "segmentText: Returning " + segmentedText + " \n");  }       
+         // TEST 12: Returned segments should be suffixed with ellipsis (segment 1), prefixed and suffixed with ellipsis (segments 2 - last-1) and prefixed with ellipsis (last segment)
+         return segmentedText;   
+      }  
+   }
+
+   private static void testSegmentText() {
+
+   String testText = "";
+   ArrayList<String> result = null;
+
+   System.out.println("***************************************************************************************************");
+   System.out.println("TEST 1: Post is shorter than or equal to postLengthLimit (should return with one segment)");
+
+   testText = "Weapons cleave it not, fire consumeth it not; the waters do not drench it, nor doth the wind waste it. It is incapable of being cut, burnt, drenched, or dried up. It is unchangeable, all-pervading, stable, firm, and eternal. It is said to be imperceivable, inconceivable and unchangeable.";
+   result = segmentText(testText, DEFAULT_POST_LENGTH_LIMIT_CHARACTERS);
+   System.out.println(result);
+   
+   System.out.println("***************************************************************************************************");
+   System.out.println("TEST 2: Post is longer than postLengthLimit (should segment)");
+   System.out.println("AND");
+   System.out.println("TEST 3: Post is longer than postLengthLimit and segment contains spaces (should segment on space)");
+
+   testText = "Know that [the soul] to be immortal by which all this [universe] is pervaded. No one can compass the destruction of that which is imperishable. It hath been said that those bodies of the Embodied (soul) which is eternal, indestructible and infinite, have an end. Do thou, therefore, fight, O Bharata. He who thinks it (the soul) to be the slayer and he who thinks it to be the slain, both of them know nothing; for it neither slays nor is slain. It is never born, nor doth it ever die; nor, having existed, will it exist no more. Unborn, unchangeable, eternal, and ancient, it is not slain upon the body being perished. That man who knoweth it to be indestructible, unchangeable, without decay, how and whom can he slay or cause to be slain? As a man, casting off robes that are worn out, putteth on others that are new, so the Embodied (soul), casting off bodies that are worn out, entereth other bodies that are new. Weapons cleave it not, fire consumeth it not; the waters do not drench it, nor doth the wind waste it. It is incapable of being cut, burnt, drenched, or dried up. It is unchangeable, all-pervading, stable, firm, and eternal. It is said to be imperceivable, inconceivable and unchangeable.";
+   result = segmentText(testText, DEFAULT_POST_LENGTH_LIMIT_CHARACTERS);
+
+   System.out.println("***************************************************************************************************");
+   System.out.println("TEST 4: Post is longer than postLengthLimit and segment does not contain spaces (should truncate)");
+
+   testText = "Knowthat[thesoul]tobeimmortalbywhichallthis[universe]ispervaded.Noonecancompassthedestructionofthatwhichisimperishable.IthathbeensaidthatthosebodiesoftheEmbodied(soul)whichiseternal,indestructibleandinfinite,haveanend.Dothou,therefore,fight,OBharata.Hewhothinksit(thesoul)tobetheslayerandhewhothinksittobetheslain,bothofthemknownothing;foritneitherslaysnorisslain.Itisneverborn,nordothiteverdie;nor,havingexisted,willitexistnomore.Unborn,unchangeable,eternal,andancient,itisnotslainuponthebodybeingperished.Thatmanwhoknowethittobeindestructible,unchangeable,withoutdecay,howandwhomcanheslayorcausetobeslain?Asaman,castingoffrobesthatarewornout,puttethonothersthatarenew,sotheEmbodied(soul),castingoffbodiesthatarewornout,enterethotherbodiesthatarenew.Weaponscleaveitnot,fireconsumethitnot;thewatersdonotdrenchit,nordoththewindwasteit.Itisincapableofbeingcut,burnt,drenched,ordriedup.Itisunchangeable,all-pervading,stable,firm,andeternal.Itissaidtobeimperceivable,inconceivableandunchangeable.";
+   result = segmentText(testText, DEFAULT_POST_LENGTH_LIMIT_CHARACTERS);
+
+   System.out.println("***************************************************************************************************");
+   System.out.println("TEST 5: Post is longer than postLengthLimit, segment contains url longer than 23 characters, and extra words are available (should add as many extra words as possible)");   // See segment zero
+   System.out.println("AND");
+   System.out.println("TEST 6: Post is longer than postLengthLimit, segment contains url longer than 23 characters, and extra words are NOT available (should add the rest of the string)");   // Note - it does for segment one, and then it removes it again because there's a space after the url
+
+   testText = "Know that [the soul] to be immortal by which all this [universe] is pervaded. https://www.sacred-texts.com/hin/m06/m06026.htm No one can compass the destruction of that which is imperishable. https://www.sacred-texts.com/hin/m06/m06026.htm It hath been said that those bodies of the Embodied (soul) which is eternal, indestructible and infinite, have an end. Do thou, therefore, fight, O Bharata. He who thinks it (the soul) to be the slayer and he who thinks it to be the slain, both of them know nothing; for it neither slays nor is slain. It is never born, nor doth it ever die; nor, having existed, will it exist no more. Unborn,unchangeable,eternal,andancient,itisnotslainuponthebodybeingperished. https://www.sacred-texts.com/hin/m06/m06026.htm Thatmanwhoknowethittobeindestructible,unchangeable,withoutdecay,howandwhomcanheslayorcausetobeslain? https://www.sacred-texts.com/hin/m06/m06026.htm Asaman,castingoffrobesthatarewornout,puttethonothersthatarenew,sotheEmbodied(soul),castingoffbodiesthatarewornout,enterethotherbodiesthatarenew.Weaponscleaveitnot,fireconsumethitnot;thewatersdonotdrenchit,nordoththewindwasteit.Itisincapableofbeingcut,burnt,drenched,ordriedup.Itisunchangeable,all-pervading,stable,firm,andeternal.Itissaidtobeimperceivable,inconceivableandunchangeable.";
+   result = segmentText(testText, DEFAULT_POST_LENGTH_LIMIT_CHARACTERS);
+
+   System.out.println("***************************************************************************************************");
+   System.out.println("TEST 7: A single character followed by a space is at the start of a candidate segment, followed by a block with no spaces (to confirm understanding)");
+
+   testText = "K nowthat[thesoul]tobeimmortalbywhichallthis[universe]ispervaded.https://mas.to/Noonecancompassthedestructionofthatwhichisimperishable.IthathbeensaidthatthosebodiesoftheEmbodied(soul)whichiseternal,indestructibleandinfinite,haveanend.Dothou,therefore,fight,OBharata.Hewhothinksit(thesoul)tobetheslayerandhewhothinksittobetheslain,bothofthemknownothing;foritneitherslaysnorisslain.Itisneverborn,nordothiteverdie;nor,havingexisted,willitexistnomore.Unborn,unchangeable,eternal,andancient,itisnotslainuponthebodybeingperished.Thatmanwhoknowethittobeindestructible,unchangeable,withoutdecay ,howandwhomcanheslayorcausetobeslain?http://mas.to/Asaman,castingoffrobesthatarewornout,puttethonothersthatarenew,sotheEmbodied(soul),castingoffbodiesthatarewornout,enterethotherbodiesthatarenew.Weaponscleaveitnot,fireconsumethitnot;thewatersdonotdrenchit,nordoththewindwasteit.Itisincapableofbeingcut,burnt,drenched,ordriedup.Itisunchangeable,all-pervading,stable,firm,andeternal.Itissaidtobeimperceivable,inconceivableandunchangeable.Therefore,knowingittobesuch,itbehoveththeenottomourn(forit).Thenagainevenifthouregardestitasconstantlybornandconstantlydead,itbehoveththeenotyet,Omighty-armedone,tomourn(forit)thus.For,ofonethatisborn,deathiscertain;andofonethatisdead,birthiscertain.Therefore.itbehoveththeenottomourninamatterthatisunavoidable.Allbeings(beforebirth)wereunmanifest.Onlyduringaninterval(betweenbirthanddeath),OBharata,aretheymanifest;andthenagain,whendeathcomes,theybecome(oncemore)unmanifest.Whatgriefthenisthereinthis?Onelooksuponitasamarvel;anotherspeaksofitasamarvel.Yetevenafterhavingheardofit,nooneapprehendsittruly.";
+   result = segmentText(testText, DEFAULT_POST_LENGTH_LIMIT_CHARACTERS);
+
+   System.out.println("***************************************************************************************************");
+   System.out.println("TEST 8: Post is longer than postLengthLimit, segment is longer than segment limit due to preceding processing (should be trimmed) ");
+   System.out.println("AND");
+   System.out.println("TEST 10: Post is longer than postLengthLimit, segment needs to be trimmed and can be trimmed on word boundary (is trimmed on word boundary)");
+
+   testText = "Know that [the soul] to be immortal by which all this [universe] is pervaded. https://www.sacred-texts.com/hin/m06/m06026.htm No one can compass the destruction of that which is imperishable. https://www.sacred-texts.com/hin/m06/m06026.htm It hath been said that those bodies of the Embodied (soul) which is eternal, indestructible and infinite, have an end. Do thou, therefore, fight, O Bharata. He who thinks it (the soul) to be the slayer and he who thinks it to be the slain, both of them know nothing; for it neither slays nor is slain. It is never born, nor doth it ever die; nor, having existed, will it exist no more. Unborn, unchangeable, eternal, and ancient, it is not slain upon the body being perished. https://www.sacred-texts.com/hin/m06/m06026.htm That man who knoweth it to be indestructible, unchangeable, without decay, how and whom can he slay or cause to be slain? https://www.sacred-texts.com/hin/m06/m06026.htm As a man, casting off robes that are worn out, putteth on others that are new, so the Embodied (soul), casting off bodies that are worn out, entereth other bodies that are new. Weapons cleave it not, fire consumeth it not; the waters do not drench it, nor doth the wind waste it. It is incapable of being cut, burnt, drenched, or dried up. It is unchangeable, all-pervading, stable, firm, and eternal. https://www.sacred-texts.com/hin/m06/m06026.htm It is said to be imperceivable, inconceivable and unchangeable. https://www.sacred-texts.com/hin/m06/m06026.htm";
+   result = segmentText(testText, DEFAULT_POST_LENGTH_LIMIT_CHARACTERS);
+
+   System.out.println("***************************************************************************************************");
+   System.out.println("TEST 9: Post is longer than postLengthLimit, segment contains url shorter than 23 characters (should be trimmed) ");
+   System.out.println("AND");
+   System.out.println("TEST 10: Post is longer than postLengthLimit, segment needs to be trimmed and can be trimmed on word boundary (is trimmed on word boundary)");
+
+   testText = "Know that [the soul] to be immortal by which all this [universe] is pervaded. https://mas.to/ No one can compass the destruction of that which is imperishable. https://mas.to/ It hath been said that those bodies of the Embodied (soul) which is eternal, indestructible and infinite, have an end. Do thou, therefore, fight, O Bharata. He who thinks it (the soul) to be the slayer and he who thinks it to be the slain, both of them know nothing; for it neither slays nor is slain. It is never born, nor doth it ever die; nor, having existed, will it exist no more. Unborn, unchangeable, eternal, and ancient, it is not slain upon the body being perished. That man who knoweth it to be indestructible, unchangeable, without decay, how and whom can he slay or cause to be slain? As a man, casting off robes that are worn out, putteth on others that are new, so the Embodied (soul), casting off bodies that are worn out, entereth other bodies that are new. Weapons cleave it not, fire consumeth it not; the waters do not drench it, nor doth the wind waste it. It is incapable of being cut, burnt, drenched, or dried up. It is unchangeable, all-pervading, stable, firm, and eternal. It is said to be imperceivable, inconceivable and unchangeable.";
+   result = segmentText(testText, DEFAULT_POST_LENGTH_LIMIT_CHARACTERS);
+
+   System.out.println("***************************************************************************************************");
+   System.out.println("TEST 11: Post is longer than postLengthLimit, segment needs to be trimmed and cannot be trimmed on word boundary (should be truncated at the longest value for which the sLength (postedLength) is below the segment limit)");
+
+   testText = "Knowthat[thesoul]tobeimmortalbywhichallthis[universe]ispervaded.https://mas.to/Noonecancompassthedestructionofthatwhichisimperishable.https://mas.to/IthathbeensaidthatthosebodiesoftheEmbodied(soul)whichiseternal,indestructibleandinfinite,haveanend.Dothou,therefore,fight,OBharata.Hewhothinksit(thesoul)tobetheslayerandhewhothinksittobetheslain,bothofthemknownothing;foritneitherslaysnorisslain.Itisneverborn,nordothiteverdie;nor,havingexisted,willitexistnomore.Unborn,unchangeable,eternal,andancient,itisnotslainuponthebodybeingperished.Thatmanwhoknowethittobeindestructible,unchangeable,withoutdecay,howandwhomcanheslayorcausetobeslain?Asaman,castingoffrobesthatarewornout,puttethonothersthatarenew,sotheEmbodied(soul),castingoffbodiesthatarewornout,enterethotherbodiesthatarenew.Weaponscleaveitnot,fireconsumethitnot;thewatersdonotdrenchit,nordoththewindwasteit.Itisincapableofbeingcut,burnt,drenched,ordriedup.Itisunchangeable,all-pervading,stable,firm,andeternal.Itissaidtobeimperceivable,inconceivableandunchangeable.";
+   result = segmentText(testText, DEFAULT_POST_LENGTH_LIMIT_CHARACTERS);
+
+   System.out.println("***************************************************************************************************");
+   System.out.println("TEST 12: Returned segments should be suffixed with ellipsis (segment 1), prefixed and suffixed with ellipsis (segments 2 - last-1) and prefixed with ellipsis (last segment) - SEE PREVIOUS");
+
+   }
+
+   private static int getPostedLength(String text) {  // Calculates the number of characters that will be used on Mastodon to post this String, based on code points rather than chars/blocks, and urls always being 23 characters
+
+      boolean debugThis = false;  // Separate flag as output is too verbose to include in typical debug
+
+      if (debugThis) {  System.out.println(Mover.getDebugPrefix() + "Checking posted length for: " + text + " \n");  }  
+
+      String s = text.stripTrailing();
+
+      // We need to remove any links starting with http:// or https:// and count the
+      // number of times we do this, then add the character count used for urls back
+      // onto the length of what is left the same number of times. Could also replace
+      // the links with a block of characters that matches that count and then just 
+      // measure the number of code points, if there are issues with doing it this way
+      int linkCount = 0;
+      int startIndex = s.indexOf("https://");
+      if (startIndex < 0) {   startIndex = s.indexOf("http://");   }
+
+      while (startIndex >= 0) {
+
+         int urlLength = getValidUrlLength(s.substring(startIndex, s.length()));  
+
+         if (urlLength < 0) {   // Only perform our counting adjustment if we have a valid url (it's possible to start with https:// or http:// and not be a valid uri - this can be tested in the Mastodon web interface)
+            startIndex = startIndex + (s.substring(startIndex, s.length()).indexOf("//")); // just skip to the double forward slash without increasing our cound, so that the next time we look for the start of a url, with https:// or http://, we'll skip this one 
+            if (debugThis) {  System.out.println(Mover.getDebugPrefix() + "Invalid uri starting with http:// or https:// found - skipping \n");  }  
+         } else {
+            linkCount++;
+            if (debugThis) {  System.out.println(Mover.getDebugPrefix() + "Valid url " + s.substring(startIndex, (startIndex + urlLength)) +  " found from " + startIndex + ", length " + urlLength + ", link count: " + linkCount + " \n");  }  
+            s = s.substring(0,startIndex) + s.substring((startIndex + urlLength), s.length());   // trim out the link
+         }
+
+         // Search the rest of the string and find the next startIndex, or exit with -1 if there are no more
+         int n = s.substring(startIndex, s.length()).indexOf("https://");
+         if (n < 0) {   startIndex = s.indexOf("http://");   }
+
+         if (n < 0) {    // There are no more http urls in this string, so exit the while loop by stetting startIndex to -1
+            startIndex = n;   
+         } else {
+            startIndex = startIndex + n;   // We searched the rest of the string to find n, but our index actually needs to start from 0
+         }
+      }
+
+      // We should now have a string stripped of all valid http urls, and a count of the number of valid http urls
+
+      if (debugThis) {  System.out.println(Mover.getDebugPrefix() + "Post stripped of urls: " + s + " \n");  }  
+      int postedLength = s.codePointCount(0, s.length()) + (linkCount * DEFAULT_URL_CHARACTER_COUNT);
+      if (debugThis) {  System.out.println(Mover.getDebugPrefix() + "Posted length: " + postedLength + " \n");  }  
+      return postedLength;
+   }
+
+   private static int getValidUrlLength(String text) {   
+
+      boolean debugThis = false;  // Separate flag as output is too verbose to include in typical debug
+
+      String s = text.stripTrailing();
+
+      String regex = "^(https?:\\/\\/)[-a-zA-Z0-9@:%._\\+~#=]{1,256}\\.[a-z]{2,6}\\b([-a-zA-Z0-9@:%_\\+.~#?&\\/=]*)$";
+      // (sourced and adjusted from https://www.makeuseof.com/regular-expressions-validate-url/) explained:
+      // ^ is the start of the matching string
+      // (https?:\/\/) matches http:// or https://
+      // [-a-zA-Z0-9@:%._\+~#=]{1,256}\. matches characters listed in the square brackes between one and 256 times - a combined domain and subdomain must be between one and 256 characters (Mastodon allows one-character domains)
+      // [a-z]{2,6} matches a top level domain consisting only of characters from a to z between two and six times - a top-level domain
+      // \b matches a slash or any other character not in [a-zA-Z0-9_] (not matching regex \w) after the tld, to make sure subsequent characters don't extend the tld further (it will let them if \b is omitted)
+      // ([-a-zA-Z0-9@:%_\+.~#?&\/=]*) matches any of the characters between the parentheses zero or more times (the asterisk) 
+
+      boolean valid = false;   
+
+      // Multiple substrings of the whole url, starting from the beginning, will be
+      // recognised as valid urls, so instead let's start from the end and then stop
+      // as soon as we find a url that is valid (ie doesn't have a load of characters
+      // that are not part of the url on the end)
+
+      int index = s.length() + 1;   // First iteration will start by subtracting one, so will start from the full text of s
+      while ((!valid) && (index > 0)) {   // Stop before the index reaches zero as iterations start by subtracting one which must not take them below zero 
+         index--;
+         if (s.substring(0, index).matches(regex)) {   
+            valid = true;   
+            if (debugThis) {  System.out.println(Mover.getDebugPrefix() + "getValidUrlLength candidate url " + s.substring(0, index) + " is valid \n");  }
+         } else {
+            if (debugThis) {  System.out.println(Mover.getDebugPrefix() + "getValidUrlLength candidate url " + s.substring(0, index) + " is not yet valid \n");  } 
+         }
+      } // end of while loop
+
+      if (debugThis) { System.out.println(Mover.getDebugPrefix() + "getValidUrlLength returning length for url " + s.substring(0,index) + " \n");  }
+
+      return index;
+   }
+
+   private static boolean containsUrl(String text) {
+
+      String regex = "(https?:\\/\\/)[-a-zA-Z0-9@:%._\\+~#=]{1,256}\\.[a-z]{2,6}\\b([-a-zA-Z0-9@:%_\\+.~#?&\\/=]*)";   
+
+      // This regex has to be different to that used in getValidUrlLength(String text), 
+      // which insists on being the full string whereas this should match any substring 
+      // (notice the missing ^ and $ at each end)
+
+      boolean r = Pattern.compile(regex).matcher(text).find();
+      if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Mover#containsUrl: result: " + r + " \n");  }  
+      return r;
+   }
+
+   private static int getIndexOfFirstWhitespace(String text) {
+      
+      boolean found = false;
+      int j = -1;
+
+      while ((!found) && (j < (text.length() - 2))) {
+         j++;
+         found = Character.isWhitespace(text.codePointAt(j));
+
+      }
+      if (found) {
+         return j;   
+      } else {
+         return -1;
+      }
+   }
+
+   private static int getIndexOfLastWhitespace(String text) {
+
+      boolean found = false;
+      int j = text.length();
+
+      while ((!found) && (j > 0)) {
+         j--;
+         found = Character.isWhitespace(text.codePointAt(j));
+      }
+      if (found) {
+         return j;   
+      } else {
+         return -1;
+      }
+   }
 
 
    /**

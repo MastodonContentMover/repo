@@ -280,10 +280,17 @@ public class Authenticator {
             if (oAuthCallbackCode != null)   // Not thread safe if the method isn't synchronized
             {  
                if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "oAuthCallbackCode isn't null - getting token \n");  }
-               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "clientKey: " + clientKey);  }
-               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "clientSecret: " + clientSecret);  }
-               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "callbackRedirectUri: " + callbackRedirectUri);  }
-               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "oAuthCallbackCode: " + oAuthCallbackCode);  }
+
+               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Authenticator#getClient: clientKey received");  }
+               if (false) {  System.out.println(Mover.getDebugPrefix() + "Authenticator#getClient: clientKey: " + clientKey);  }
+
+               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Authenticator#getClient: clientSecret received");  }
+               if (false) {  System.out.println(Mover.getDebugPrefix() + "Authenticator#getClient: clientSecret: " + clientSecret);  }
+
+               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Authenticator#getClient: callbackRedirectUri: " + callbackRedirectUri);  }
+
+               if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Authenticator#getClient: oAuthCallbackCode received");  }
+               if (false) {  System.out.println(Mover.getDebugPrefix() + "Authenticator#getClient: oAuthCallbackCode: " + oAuthCallbackCode);  }
 
                String token = oauthMethodsObject.getUserAccessTokenWithAuthorizationCodeGrant(clientKey, clientSecret, callbackRedirectUri, oAuthCallbackCode).execute().getAccessToken();
                if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Got token. Connecting... \n");  }
@@ -343,8 +350,9 @@ public class Authenticator {
    *   @since 0.01.00
    *   @author Tokyo Outsider
    */
-   protected void oAuthCallback (String code) {
-      if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "OAuthListener called back to Authenticator with code: " + code);  }
+   protected void oAuthCallback(String code) {
+      if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Authenticator#oAuthCallback: OAuthListener called back to Authenticator with OAuth callback code");  }
+      if (false) {  System.out.println(Mover.getDebugPrefix() + "Authenticator#oAuthCallback: Code: " + code);  }
       oAuthCallbackCode = code;
    }
 
