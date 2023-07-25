@@ -147,7 +147,8 @@ public class Mover {
    private static final int STATUSES_PER_PAGE = 40;   // Current maximum
    private static final int API_THROTTLE_SECONDS = 5;  // Actual limit is 1
    private static final int API_THROTTLE_STATUS_PAGE_SECONDS = 5;  // Actual limit is 1
-   private static final int API_THROTTLE_NEW_POST_SECONDS = 5;  // Actual limit is 1
+   private static final int API_THROTTLE_NEW_NONPUBLIC_POST_SECONDS = 5;  // Actual limit is 1
+   private static final int API_THROTTLE_NEW_PUBLIC_POST_SECONDS = 20;  // Actual limit is 1
    private static final int API_THROTTLE_MEDIA_UPLOAD_SECONDS = 120;  // Actual limit is 60 seconds for uploading media
 
    // Used to decide whether or not to download a thumbnail
@@ -771,7 +772,16 @@ public class Mover {
 
                if (dateCheck) {
    
-                  secondsToCompletion = secondsToCompletion + API_THROTTLE_NEW_POST_SECONDS + parameterExtraThrottleSeconds; // for the post itself
+                  // for the post itself
+                  if ((!parameterSuppressPublic) && (p.getVisibility().toLowerCase().equals(Visibility.Public.toString().toLowerCase())) ) {
+                     // post is public and we're not suppressing public posts
+                     secondsToCompletion = secondsToCompletion + API_THROTTLE_NEW_PUBLIC_POST_SECONDS; 
+                  } else {
+                     // post isn't public or we are suppressing public posts
+                     secondsToCompletion = secondsToCompletion + API_THROTTLE_NEW_NONPUBLIC_POST_SECONDS; 
+                  }
+                  secondsToCompletion = secondsToCompletion + parameterExtraThrottleSeconds; 
+
                   List<MediaFile> media = p.getMedia();
                   if (media != null) {
                      secondsToCompletion = secondsToCompletion + (media.size() * (API_THROTTLE_MEDIA_UPLOAD_SECONDS + parameterExtraThrottleSeconds)); // for uploading media
@@ -999,7 +1009,14 @@ public class Mover {
                   // Register the new Mastodon instance id for our post
                   p.addMastodonId(PostArchive.getMastodonId(parameterInstance, z.getId()));
                   System.out.print(".");
-                  try { TimeUnit.SECONDS.sleep(API_THROTTLE_NEW_POST_SECONDS + parameterExtraThrottleSeconds);  }  catch (InterruptedException ie) {   }
+
+                  int sleepTime = parameterExtraThrottleSeconds;
+                  if (visibility == Visibility.Public) {
+                     sleepTime = sleepTime + API_THROTTLE_NEW_PUBLIC_POST_SECONDS;
+                  } else {
+                     sleepTime = sleepTime + API_THROTTLE_NEW_NONPUBLIC_POST_SECONDS; 
+                  }
+                  try { TimeUnit.SECONDS.sleep(sleepTime);  }  catch (InterruptedException ie) {   }
             
                   // Rebookmark if it hasn't been disabled - if we have multiple segments, rebookmark all of them
                   if (p.isBookmarked() && parameterPreserveBookmarks.booleanValue()) {
@@ -1289,6 +1306,11 @@ public class Mover {
 
    }
 
+   // TODO: (Maybe) Adjust this to account for Mastodon's shortening of @ tags as well, 
+   // in case not stripping @ tags is ever added as a feature (if it is, this code as it
+   // stands won't calculate the posted length correctly as it doesn't account for 
+   // Mastodon's shortening of @-tagged names to only the handle before the @ domain)
+   // (issue encountered by user RecoveredExpert in early June 2023)
    private static int getPostedLength(String text) {  // Calculates the number of characters that will be used on Mastodon to post this String, based on code points rather than chars/blocks, and urls always being 23 characters
 
       boolean debugThis = false;  // Separate flag as output is too verbose to include in typical debug
