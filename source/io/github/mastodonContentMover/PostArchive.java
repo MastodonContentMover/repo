@@ -395,11 +395,12 @@ public class PostArchive {
    *   @since 0.01.00
    *   @author Tokyo Outsider
    */
-   protected synchronized void addMastodonId(String newId, Post postObject)
-   {
-      // this.postsByMastodonId.remove(oldId);               // TODO: Never do this until you successfully complete a full upload (write a separate method for that, to remove all bar the most recent id from the post objects)
-      this.postsByMastodonId.put(newId, postObject);
-   }
+// Removing 7/30 to see what breaks - redundant as registerPostByMastodonId also exists (albeit with the parameters the other way around XD )
+//   protected synchronized void addMastodonId(String newId, Post postObject)
+//   {
+//      // this.postsByMastodonId.remove(oldId);               // TODO: Never do this until you successfully complete a full upload (write a separate method for that, to remove all bar the most recent id from the post objects)
+//      this.postsByMastodonId.put(newId, postObject);
+//   }
 
    /**
    *   Retrieves a reference to the {@link io.github.mastodonContentMover.Post} object 

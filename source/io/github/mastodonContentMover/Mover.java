@@ -148,7 +148,7 @@ public class Mover {
    private static final int API_THROTTLE_SECONDS = 5;  // Actual limit is 1
    private static final int API_THROTTLE_STATUS_PAGE_SECONDS = 5;  // Actual limit is 1
    private static final int API_THROTTLE_NEW_NONPUBLIC_POST_SECONDS = 5;  // Actual limit is 1
-   private static final int API_THROTTLE_NEW_PUBLIC_POST_SECONDS = 20;  // Actual limit is 1
+   private static final int API_THROTTLE_NEW_PUBLIC_POST_SECONDS = 30;  // Actual limit is 1
    private static final int API_THROTTLE_MEDIA_UPLOAD_SECONDS = 120;  // Actual limit is 60 seconds for uploading media
 
    // Used to decide whether or not to download a thumbnail

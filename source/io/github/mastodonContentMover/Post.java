@@ -79,7 +79,7 @@ public class Post {
    private static final String JAXB_ENCODING_UTF16_UNSPECIFIED_ENDIAN = "UTF-16";
    private static final String JAXB_ENCODING = JAXB_ENCODING_UTF16_UNSPECIFIED_ENDIAN;
 
-
+   private static final String MASTODON_ID_ALREADY_ADDED_EXCEPTION = "Mastodon id already added for this post — duplicate returned from instance? ";
 
 
    private Post() {
@@ -179,7 +179,7 @@ public class Post {
       if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Mastodon ids for post " + this.archiveId + ": " + this.mastodonIds.size());  }
       for (String m: this.mastodonIds) {
             this.postArchive.registerPostByMastodonId(this, m);
-      if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Registering post " + this.text + " with mastodonId " + m);  }
+            if (Mover.showDebug()) {  System.out.println(Mover.getDebugPrefix() + "Registering post " + this.text + " with mastodonId " + m);  }
       }
 
       // The other object that was loaded during unmarshalling should now just be garbage
@@ -257,19 +257,48 @@ public class Post {
    */
    protected synchronized void addMastodonId(String mi) throws JAXBException, IOException
    {
-      this.mastodonIds.add(mi);
+      // **** Code here adjusted 7/26 after duplicate post ids returned from 
+      // Universeodon (credit to @rrgeorge@raphus.social for pointing out that
+      // error seen on console on reposting was being generated within MCM) ****
 
-      // The PostArchive maintains an index of posts by mastodonId, so we need to tell it as this call has come direct to the data object
-      this.postArchive.addMastodonId(mi, this);
+      if (this.hasMastodonId(mi)) {
+         throw new RuntimeException(MASTODON_ID_ALREADY_ADDED_EXCEPTION + " (" + mi + ")");  // Should this be an IllegalStateException?
+      } else {
+         this.mastodonIds.add(mi);
 
-      if (saveOnEveryChange) {
-         this.writeToFile();
+         // The PostArchive maintains an index of posts by mastodonId, so we need to tell it as this call has come direct to the data object
+         // this.postArchive.addMastodonId(mi, this);   // Switched 7/30 to apparently duplicate method registerPostByMastodonId, which also checks explicitly for duplicates even though it shouldn't really have to as the data is held in a HashMap - belt & braces!
+         this.postArchive.registerPostByMastodonId(this, mi);
+         if (saveOnEveryChange) {
+            this.writeToFile();
+         }
       }
    }
 
    /**
+   *   Checks whether the specified mastodonId {@link java.lang.String} value, comprised
+   *   of a Mastodon instance hostname/address concatenated with the id used for the 
+   *   status on that instance, is already among those associated with this 
+   *   {@link io.github.mastodonContentMover.Post} object.
+   *   <br /><br />
+   *   @param mi a Mastodon instance hostname/address concatenated with a separator and
+   *             the id used for the status on that instance
+   *   <br /><br />
+   *   @since 0.01.05
+   *   @author Tokyo Outsider
+   */
+   protected synchronized boolean hasMastodonId(String mi) {
+
+      boolean registered = false;
+      for (String m: this.mastodonIds) {
+            registered = registered || (m.equals(mi));   // set the value to true if the new MastodonId is already attached to this Post
+      }
+      return registered;      
+   }
+
+   /**
    *   Obtains an ordered primitive {@link java.lang.String} array of all the mastodonId
-   *   valued associated with this {@link io.github.mastodonContentMover.Post} object, 
+   *   values associated with this {@link io.github.mastodonContentMover.Post} object, 
    *   each comprised of a Mastodon instance hostname/address concatenated with the id 
    *   used for the status on that instance.
    *   <br /><br />
