@@ -106,12 +106,14 @@ import kotlin.collections.*;   // from kotlin-stdlib-1.8.10.jar
 *   Additional, optional command-line options that are currently implemented are as follows:
 *   <ul>
 *      <li>{@code -showdebug}</li>
-*      <li>{@code -preserveHashtags}</li>
 *      <li>{@code -bookmarkedOnly}</li>
-*      <li>{@code -from} (only when using {@code post})</li>
-*      <li>{@code -until} (only when using {@code post})</li>
 *      <li>{@code -extraThrottle}</li>
 *      <li>{@code -customPort}</li>
+*      <li>{@code -from} (only when using {@code post})</li>
+*      <li>{@code -until} (only when using {@code post})</li>
+*      <li>{@code -preserveHashtags} (only when using {@code post} ?)</li>
+*      <li>{@code -suppressPublic} (only when using {@code post})</li>
+*      <li>{@code -testMode}</li>
 *   </ul>
 *   <br /><br />
 *   @author Tokyo Outsider
@@ -148,7 +150,7 @@ public class Mover {
    private static final int API_THROTTLE_SECONDS = 5;  // Actual limit is 1
    private static final int API_THROTTLE_STATUS_PAGE_SECONDS = 5;  // Actual limit is 1
    private static final int API_THROTTLE_NEW_NONPUBLIC_POST_SECONDS = 5;  // Actual limit is 1
-   private static final int API_THROTTLE_NEW_PUBLIC_POST_SECONDS = 30;  // Actual limit is 1
+   private static final int API_THROTTLE_NEW_PUBLIC_POST_SECONDS = 60;  // Actual limit is 1
    private static final int API_THROTTLE_MEDIA_UPLOAD_SECONDS = 120;  // Actual limit is 60 seconds for uploading media
 
    // Used to decide whether or not to download a thumbnail
@@ -169,6 +171,7 @@ public class Mover {
    private static Integer parameterExtraThrottleSeconds = null;
    private static Integer parameterCustomPort = null;
    private static Boolean parameterSuppressPublic = null; 
+   private static Boolean parameterTestMode = null; 
 
    // Parameter names must be specified here as lower case so case-insensitive matching works
    private static final String PARAMETER_NAME_INSTANCE = "instance";
@@ -184,6 +187,7 @@ public class Mover {
    private static final String PARAMETER_NAME_EXTRA_THROTTLE_SECONDS = "extrathrottle"; 
    private static final String PARAMETER_NAME_CUSTOM_PORT = "customport"; 
    private static final String PARAMETER_NAME_SUPPRESS_PUBLIC = "suppresspublic"; 
+   private static final String PARAMETER_NAME_TEST_MODE = "testmode"; 
    private static final String OPERATION_NAME_SAVE = "save";
    private static final String OPERATION_NAME_POST = "post";
 
@@ -363,6 +367,25 @@ public class Mover {
                       throw new IllegalArgumentException(MALFORMED_PARAMETER_PREFIX + "'" + b[0] + "' " + MALFORMED_PARAMETER_ALREADY_DEFINED_SUFFIX + MALFORMED_PARAMETER_SUFFIX); 
                   }
                }
+               else if (b[0].toLowerCase().equals(PARAMETER_NAME_TEST_MODE)) {  // Can't switch on boolean
+
+                  if (parameterTestMode == null) {   // TODO: Turn this repeated logic into a convenience method, and do the same for the logic repeatedly used in the switch statements
+                     if (b[1].toLowerCase().equals("yes")) {
+                        parameterTestMode = Boolean.valueOf(true);
+                     }
+                     else if (b[1].toLowerCase().equals("no")) {
+                        parameterTestMode = Boolean.valueOf(false);
+                     }
+                     else {
+                        throw new IllegalArgumentException(MALFORMED_PARAMETER_PREFIX + MALFORMED_PARAMETER_INVALID_VALUE_PREFIX + "'" + b[0] + "'. " + MALFORMED_PARAMETER_SUFFIX); 
+                     }
+         
+                     System.out.println("Parameter '" + b[0] + "' set to '" + b[1] + "' \n");
+
+                  } else {
+                      throw new IllegalArgumentException(MALFORMED_PARAMETER_PREFIX + "'" + b[0] + "' " + MALFORMED_PARAMETER_ALREADY_DEFINED_SUFFIX + MALFORMED_PARAMETER_SUFFIX); 
+                  }
+               }
                else {
                   switch (b[0].toLowerCase()) {
                      case PARAMETER_NAME_INSTANCE:
@@ -483,13 +506,15 @@ public class Mover {
 
       }
 
-      // Set defaults for uninitialized variables
+      // Set defaults for uninitialized variables - TODO perhaps move these up so they're
+      // kept with where the parameters are collected from command line input?
       if (parameterPreserveHashtags == null) {  parameterPreserveHashtags = Boolean.valueOf(false);   }
       if (parameterPreserveBookmarks == null) {  parameterPreserveBookmarks = Boolean.valueOf(true);   }
       if (parameterPreservePins == null) {  parameterPreservePins = Boolean.valueOf(true);   }
       if (parameterBookmarkedOnly == null) {  parameterBookmarkedOnly = Boolean.valueOf(false);   }
       if (parameterExtraThrottleSeconds == null) {  parameterExtraThrottleSeconds = Integer.valueOf(0);   }     
       if (parameterSuppressPublic == null) {  parameterSuppressPublic = Boolean.valueOf(true);   }
+      if (parameterTestMode == null) {  parameterTestMode = Boolean.valueOf(false);   }
 
       /**
       *   DO NOT set the custom port parameter to the default here, otherwise it will 
@@ -994,7 +1019,8 @@ public class Mover {
                                                                             mediaIdsThisTime, 
                                                                             p.isSensitive(), 
                                                                             p.getSpoilerText(), 
-                                                                            p.getLanguage()
+                                                                            p.getLanguage(),
+                                                                            !parameterTestMode      // set addIdempotencyKey to false when in test mode
                                                                             ).execute();
 
                if (z == null) {    
